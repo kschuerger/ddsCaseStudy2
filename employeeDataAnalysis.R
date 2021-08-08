@@ -1,0 +1,500 @@
+# Executive Summary
+### The client, DDSAnalytics, is interested in leveraging data science for talent management, and has tasked my team with conducting an 
+# analysis of existing employee data, before green lighting the larger data science initiative. The following case study explores factors 
+# leading to attrition, using a data set provided by Frito Lay, in an effort to develop a model that will aid in predicting employee turnover.  
+
+### Using ROC analysis of Naive Bayes on an undersampling of the data, it was determined that the top 3 contributors to employee turnover are:
+### Overtime, Monthly Income, and Total Years Worked. Using these variables only, it was possible to determine whether an employee would 
+### experience attrition with an overall accuracy of approximately 66%. 
+
+### We were also asked to identify the top variables contributing to employees' monthly income. Using different automatic variable 
+### selection techniques on a linear regression model, it was determined that the top variables are: Business Travel, Job Level, Job Role, Percent Salary Hike, Performance Rating, and Total Working Years. 
+### Using a linear model created with these variables, it is possible to predict the mean monthly income for an employee with an accuracy of plus or ### minus $991.07, and to account for approximately 95.4% of the variation in the means of monthly income.
+
+library(tidyverse)
+library(e1071)
+library(caret)
+library(corrplot)
+library(class)
+library(vcd)
+library(olsrr)
+library(MPV)
+library(cowplot)
+library(ggplot2)
+library(GGally)
+
+## Code and Analysis
+
+### First I imported the Employee Data. Noting that the data does not contain any missing entries, I then dropped unnecessary columns:  the Employee ID numbers, 
+### Employee Count as that was  1 for all entries, Employee Number, Over 18 as all employees were over 18, and Standard Hours as all Standard 
+### Hours were 80. These data points do not add any value to our analysis. 
+# I then converted all columns of the character class to factors so that they could be treated as categorical variables. The new data
+### consist of 870 rows in 30 columns. (Original 870, 36)
+
+
+#Data Import
+empDataStart = read.csv(file.choose(), header = TRUE)
+head(empDataStart, n = 5)
+
+
+# get column names
+dfColumns = data.frame(colnames(empDataStart))
+dfColumns
+
+# look at the data 
+head(empDataStart, n = 10)
+str(empDataStart)
+
+dim(empDataStart)
+
+# Look at character columns.  Character columns with multiple levels that only contain one value 
+# add no value to the analysis and can cause operations to fail
+empDataStart %>% keep(is.character) %>% sapply(., unique)
+
+# Over18 appears to be the only character with only one unique value represented.  We can remove
+# it from the dataset
+
+# Just like character variables with only one unique value, continuous variables (ints) that do not
+# change from record to record add no value
+empDataStart %>% keep(is.numeric) %>% sapply(., unique)
+
+# StandardHours is always 80
+# EmployeeCount is always 1
+# Other variables that do not add any information to the analysis can be
+# database IDs, employee IDs, etc.  Let's look for those and remove them as well.
+# ID
+# Employee Number
+# So, from this analysis, the following columns can be removed
+# ID
+# EmployeeCount
+# EmployeeNumber
+# Over18
+# StandardHours
+
+
+# create new df
+# remove some of the columns that do not have relevant info
+## ID, DailyRate, EmployeeCount, HourlyRate, Over18, StandardHours
+empData = subset(empDataStart, select = -c(ID, DailyRate, EmployeeCount, EmployeeNumber, Over18, StandardHours))
+head(empData, n=5)
+# get column names
+dfColumns = data.frame(colnames(empData))
+dfColumns
+
+dim(empData)
+
+#Convert characters to factors
+empData[sapply(empData, is.character)] <- lapply(empData[sapply(empData, is.character)], 
+                                                 as.factor)
+#Check for NAs
+sapply(empData,function(x) sum(is.na(x)))
+
+#Check number of levels for each factor
+str(empData)
+
+#convert more columns for int to factor
+empData$Education <- as.factor(empData$Education)
+empData$JobInvolvement <- as.factor(empData$JobInvolvement)
+empData$JobLevel <- as.factor(empData$JobLevel)
+empData$JobSatisfaction <- as.factor(empData$JobSatisfaction)
+empData$PerformanceRating <- as.factor(empData$PerformanceRating)
+empData$RelationshipSatisfaction <- as.factor(empData$RelationshipSatisfaction)
+empData$StockOptionLevel <- as.factor(empData$StockOptionLevel)
+empData$WorkLifeBalance <- as.factor(empData$WorkLifeBalance)
+
+
+## Identifying Factors That Contribute to Attrition
+
+### One of the issues with this dataset is that it is very unbalanced. Only about 16% of the data contains a yes value attrition, so for any 
+### model it could identify everything as no attrition and still be approximately 84% - 85% accurate. To work around this I used a technique 
+### called under sampling. I first split the data set into the 140 rows containing yes for attrition and then a separate dataframe containing 
+### the no values. I then randomly sampled 140 of the no rows and combined them with the 140 yes rows. I then ran a Naive-Bayes classifier 
+### with Leave One Out Cross Validation on the combined dataframe and saved the top 3 variables that contributed to the attrition. I repeated this
+### process 100 times, saving the top 3 variables each time. Using this process Overtime, Monthly Income, and Total Years Worked were 
+### identified as the top 3 variables contributing to attrition. This makes sense as we would except employees that feel overworked or underpaid ### to have higher levels of attrition.    
+
+## take a look at the dispersion of attrition yes and attrition no
+empData %>% group_by(empData$Attrition) %>% summarize(count=n()) 
+# we have 730 Nos and 140 yes
+# 84% No / 16% Yes
+empData %>% ggplot(aes(x = Attrition)) + geom_bar(fill = "blue") +
+  ggtitle("Attrition Plot")
+
+
+#split dataframe into separate frames for yes and no attrition
+atrYes = empData %>% filter(Attrition == "Yes")
+atrNo = empData %>% filter(Attrition == "No")
+Grid = data.frame(usekernel=TRUE,laplace = 1,adjust=1)
+
+# create dataframe to hold most important variables
+ImpName <- data.frame()
+# run naive bayes with loocv 100 times and select 3 most important variables using ROC
+# This testing uses under sampling in which 140 random no attrition values are selected to 
+# compare to the 140 yes attrition values in the original Employee Data
+for(i in 1:100){
+  atrNoSample = sample_n(atrNo, 140)
+  dfAtr = data.frame()
+  dfAtr = rbind(atrYes, atrNoSample)
+  
+  mdl = train(Attrition ~ .,data=dfAtr,method="naive_bayes",
+              trControl = trainControl(method="LOOCV"),
+              tuneGrid = Grid)
+  
+  ImpMeasure = data.frame(varImp(mdl)$importance)
+  ImpMeasure$Name = row.names(ImpMeasure)
+  ImpMeasure = ImpMeasure[order(-ImpMeasure$Yes),]
+  ImpMeasure = ImpMeasure[1:3,] %>% select(Name)
+  rownames(ImpMeasure) = NULL
+  ImpName = rbind(ImpName, ImpMeasure)
+}
+
+str(ImpName)
+ImpName %>% group_by(ImpName$Name) %>% summarize(count=n()) 
+
+ImpName %>% ggplot(aes(x = Name)) + geom_bar(fill = "blue",width=0.5,position="dodge") +
+  theme(legend.position="none",axis.text.x=element_text(angle=75,vjust=0.5)) +
+  ggtitle("Variable Importance") + ylab("Variable Count") + xlab("Variable Name")
+
+# OverTime chart
+empData %>% 
+  ggplot(aes(x = OverTime, fill = Attrition)) + geom_bar() + 
+  xlab("OverTime") + ggtitle("OverTime")
+
+
+empData %>% select(OverTime, MonthlyIncome, TotalWorkingYears,
+                   Attrition) %>% ggpairs(aes(color = Attrition))
+
+# empData %>% select(OverTime, MonthlyIncome, TotalWorkingYears,
+#                    MariatalStatus, Attrition) %>% 
+#   ggpairs(aes(color = Attrition))
+
+# empData %>% select(OverTime, MonthlyIncome, TotalWorkingYears,
+#                    Attrition) %>% 
+#   ggpairs(aes(color = OverTime))
+
+
+##################################################
+##################################################
+##################################################
+##################################################
+# now that we know what variables we want to use, let's see how 
+# they do at predicting attrition:
+
+# recall we have a data set in which people leaving (attrition = yes)
+# is underrepresented - so we cannot just split our data into 
+# 70/30 train test - we need to randomly sample from the NO group 
+
+##########################################################
+# NaiveBayes performed better than KNN tests
+##########################################################
+# create new df with only our 3 most important columns + Attrition
+# MonthlyIncome, OverTime,TotalWorkingYears
+empDataNB = subset(empData, select = c(MonthlyIncome, OverTime,TotalWorkingYears, Attrition))
+head(empDataNB, n=5)
+  
+#split dataframe into separate frames for yes and no attrition
+atrYesNB = empDataNB %>% filter(Attrition == "Yes")
+atrNoNB = empDataNB %>% filter(Attrition == "No")
+  
+iterations = 100
+  
+masterAcc = matrix(nrow = iterations)
+masterSens = matrix(nrow = iterations)
+masterSpec = matrix(nrow = iterations)
+  
+set.seed(7) # so we can replicate the results
+splitPerc = 0.7 
+
+  
+for(j in 1:iterations)
+{ 
+  atrNoSampleNB = sample_n(atrNoNB, 140)
+  dfAtrNB <- data.frame()
+  dfAtrNB = rbind(atrYesNB, atrNoSampleNB)
+  
+  trainIndices = sample(1:dim(dfAtrNB)[1], round(splitPerc * dim(dfAtrNB)[1]))
+  dfTrain = dfAtrNB[trainIndices,]
+  dfTest = dfAtrNB[-trainIndices,]
+    
+  model = naiveBayes(dfTrain[,c(1,2,3)], dfTrain$Attrition, laplace = 1)
+  predict = table(predict(model,dfTest[,c(1,2,3)]),dfTest$Attrition)
+  CM = confusionMatrix(predict)
+    
+  masterAcc[j] = CM$overall[1]
+  masterSens[j] = CM$byClass["Sensitivity"]
+  masterSpec[j] = CM$byClass["Specificity"]
+}
+  
+meanAcc = mean(masterAcc)
+meanSens = mean(masterSens)
+meanSpec = mean(masterSpec)
+  
+meanAcc
+meanSens
+meanSpec
+
+# plot(masterAcc)
+# CM
+
+############# OTHER INSIGHTS ############# 
+
+# sales representatives have lower total working years and lower montly income 
+# this 
+#Monthly income by job role histogram
+empData %>% ggplot(aes(x = MonthlyIncome, fill = JobRole)) + geom_histogram(show.legend = FALSE) + facet_wrap(~JobRole) +
+  labs(title = "Distribution of Monthly Income  By Job Role", x = "Monthly Income", y = "Count")
+#Monthly income by job role boxplot
+empData %>% ggplot(aes(y = MonthlyIncome, color = JobRole)) + geom_boxplot(show.legend = FALSE) + facet_wrap(~JobRole) +
+  labs(title = "Distribution of Monthly Income by Job Role", y = "Monthly Income") +
+  theme(axis.title.x=element_blank(),axis.text.x=element_blank(), axis.ticks.x=element_blank())
+#total working years by job role histogram
+empData %>% ggplot(aes(x = TotalWorkingYears, fill = JobRole)) + geom_histogram(show.legend = FALSE) + facet_wrap(~JobRole) +
+  labs(title = "Distribution of Total Working Years by Job Role", x = "Total Working Years", y = "Count")
+#total working years by job role boxpot
+empData %>% ggplot(aes(y = TotalWorkingYears, color = JobRole)) + geom_boxplot(show.legend = FALSE) + facet_wrap(~JobRole) +
+  labs(title = "Distribution of Total Working Years by Job Role", y = "Total Working Years") +
+  theme(axis.title.x=element_blank(),axis.text.x=element_blank(), axis.ticks.x=element_blank())
+#attrition by total working years
+empData %>% ggplot(aes(x = TotalWorkingYears, fill = Attrition)) + geom_histogram(show.legend = FALSE) + facet_wrap(~Attrition) +
+  labs(title = "Distribution of Total Working Years by Attrition", x = "Total Working Years", y = "Count")
+#attrition by monthly income
+empData %>% ggplot(aes(x = MonthlyIncome, fill = Attrition)) + geom_histogram(show.legend = FALSE) + facet_wrap(~Attrition) +
+  labs(title = "Distribution of Monthly Incomes by Attrition", x = "Monthly Income", y = "Count")
+
+# empData %>% select(Attrition,YearsInCurrentRole, YearsSinceLastPromotion, 
+#                    YearsWithCurrManager,YearsAtCompany, 
+#                    MonthlyIncome, JobSatisfaction, JobRole) %>% 
+#   ggplot(aes(x = JobRole, fill = Attrition)) + geom_bar() + 
+#   facet_wrap(~Attrition) + xlab("Attrition") + ggtitle("Job Role")
+
+# attrition by job role 
+empData %>% select(Attrition,YearsInCurrentRole, YearsSinceLastPromotion, 
+                   YearsWithCurrManager,YearsAtCompany, 
+                   MonthlyIncome, JobSatisfaction, JobRole) %>% 
+  ggplot(aes(x = JobRole, fill = Attrition)) + 
+  geom_bar(fill = "blue",width=0.5,position="dodge") +
+  theme(legend.position="none",axis.text.x=element_text(angle=75,vjust=0.5)) +
+  facet_wrap(~Attrition) + xlab("Attrition") + ggtitle("Job Role")
+
+# empData %>% select(Attrition,YearsInCurrentRole, YearsSinceLastPromotion, 
+#                    YearsWithCurrManager,YearsAtCompany, 
+#                    MonthlyIncome, JobSatisfaction, JobRole) %>% 
+#   ggplot(aes(x = JobRole, fill = Attrition)) + 
+#   geom_bar(width=0.5,position="dodge") +
+#   theme(legend.position="none",axis.text.x=element_text(angle=75,vjust=0.5)) +
+#   xlab("Attrition") + ggtitle("Job Role")
+
+######################################################
+## EXTERNAL TEST DATA EXPORT
+######################################################
+
+externalTest = read.csv(file.choose(), header = TRUE)
+
+atrNoSampleNB = sample_n(atrNoNB, 140)
+dfAtrNB = data.frame()
+dfAtrNB = rbind(atrYesNB, atrNoSampleNB)
+
+trainIndices = sample(1:dim(dfAtrNB)[1], round(splitPerc * dim(dfAtrNB)[1]))
+dfTrain = dfAtrNB[trainIndices,]
+dfTest = dfAtrNB[-trainIndices,]
+
+model = naiveBayes(dfTrain[,c(1,2,3)], dfTrain$Attrition, laplace = 1)
+
+outPredict = predict(model,newdata = externalTest)
+
+outFile = cbind(externalTest$ID, outPredict)
+outFile = as.data.frame(outFile)
+outFile = outFile %>% rename(ID = V1, Attrition = outPredict)
+outFile = outFile %>% mutate(Attrition = as.factor(Attrition))
+levels(outFile$Attrition) <- c("No","Yes")
+outFile
+write.csv(outFile, file = "Case2PredictionsSchuerger_Attrition.csv", row.names = FALSE, quote = FALSE)
+
+################################################################################
+################################################################################
+
+
+#############################################################
+#############################################################
+# PREDICT SALARY 
+# Next, we were asked to find the Salary of employees from the data in the model, with a Root Mean Squared Error of less than $3000.  To do this, we will build a multiple linear regression model using a stepwise iterative approach.  The assumptions from above RE: unneccessary data still hold, and we will leave those out as well.
+library(MASS)  # Careful with this one, it masks dplyr::select
+
+set.seed(7)
+
+#################### STEPAIC() STEPWISE SELECTION 
+# The stepAIC() function performs backward model selection by 
+# starting from a "maximal" model, which is then trimmed down. 
+# The "maximal" model is a linear regression model which assumes 
+# independent model errors and includes only main effects for the predictor variables
+
+empDataLM = subset(empData, select = -c(AttInd, OTInd))
+
+linFit = lm(MonthlyIncome ~ ., data = empDataLM)
+step = stepAIC(linFit, direction = "both") # both = stepwise
+vcov(linFit)
+step$anova
+
+# Final Model:
+#   MonthlyIncome ~ BusinessTravel + JobLevel + JobRole + PercentSalaryHike + 
+#   PerformanceRating + TotalWorkingYears
+# AIC 12039.88
+
+# linear model fitness plots
+layout(matrix(c(1,2,3,4),2,2))
+plot(linFit)
+
+# QQ plot looks like our predictions are slightly skewed to the right 
+# but for the most part looks pretty good
+# we will continue with this model 
+
+
+################### STEPAIC() BACKWARD
+empDataLM = subset(empData, select = -c(AttInd, OTInd))
+
+linFitB = lm(MonthlyIncome ~ ., data = empDataLM)
+stepB = stepAIC(linFitB, direction = "backward") 
+vcov(linFitB)
+stepB$anova
+
+# Final Model:
+#   MonthlyIncome ~ BusinessTravel + JobLevel + JobRole + PercentSalaryHike + 
+#   PerformanceRating + TotalWorkingYears
+# AIC 12039.88
+
+
+# linear model fitness plots
+# layout(matrix(c(1,2,3,4),2,2))
+# plot(linFitB)
+
+# dev.off()
+
+linFitBW = lm(MonthlyIncome ~ BusinessTravel + JobLevel + JobRole + PercentSalaryHike + 
+     PerformanceRating + TotalWorkingYears, data = empDataLM)
+
+# Function for Root Mean Squared Error
+RMSE = function(error) { sqrt(mean(error^2)) }
+RMSE(linFitBW$residuals)
+
+summary(linFitBW)
+
+################### STEPAIC() FORWARD
+# empDataLM = subset(empData, select = -c(AttInd, OTInd))
+# 
+# linFitF = lm(MonthlyIncome ~ ., data = empDataLM)
+# stepF = stepAIC(linFitF, direction = "forward") 
+# vcov(linFitF)
+# stepF$anova
+# 
+# # Final Model:
+# #   MonthlyIncome ~ Age + Attrition + BusinessTravel + Department + 
+# #   DistanceFromHome + Education + EducationField + EnvironmentSatisfaction + 
+# #   Gender + HourlyRate + JobInvolvement + JobLevel + JobRole + 
+# #   JobSatisfaction + MaritalStatus + MonthlyRate + NumCompaniesWorked + 
+# #   OverTime + PercentSalaryHike + PerformanceRating + RelationshipSatisfaction + 
+# #   StockOptionLevel + TotalWorkingYears + TrainingTimesLastYear + 
+# #   WorkLifeBalance + YearsAtCompany + YearsInCurrentRole + YearsSinceLastPromotion + 
+# #   YearsWithCurrManager
+# # AIC 12095.35
+# 
+# 
+# # linear model fitness plots
+# layout(matrix(c(1,2,3,4),2,2))
+# plot(linFitF)
+
+###################### FORWARD SELECTION
+empDataLM = subset(empData, select = -c(AttInd, OTInd))
+mdl1 = lm(MonthlyIncome ~ ., data = empDataLM)
+
+#automatic variable selection = FORWARD
+SelectForward <- ols_step_forward_p(mdl1, peneter = 0.05, details = FALSE)
+VarForward <- SelectForward$predictors
+VarForward
+# [1] "JobLevel" "JobRole" "TotalWorkingYears" "BusinessTravel" "Education"   "Department" "PerformanceRating"
+# [8] "PercentSalaryHike" "Gender" "DistanceFromHome" 
+
+
+ForwardDF <- empData %>% dplyr::select(VarForward, MonthlyIncome)
+# get column names
+dfColumns = data.frame(colnames(ForwardDF))
+dfColumns
+
+
+# Fit a model
+MdlFrwrd <- lm(MonthlyIncome ~ . , data = ForwardDF)
+
+summary(MdlFrwrd)
+
+# Function for Root Mean Squared Error
+RMSE = function(error) { sqrt(mean(error^2)) }
+RMSE(MdlFrwrd$residuals)
+
+# alternative way to get RMSE
+# RMSE2 <- sqrt((c(crossprod(residuals(MdlFrwrd))) / length(residuals(MdlFrwrd))))
+# RMSE2
+
+par(mfrow = c(2,2))
+plot(MdlFrwrd)
+     #, main = "Assumption Tests for Forward Selection Model")
+par(mfrow = c(1,1))
+
+###############################
+# both stepwise and backward selection agree on the variables 
+# Final Model:
+#   MonthlyIncome ~ BusinessTravel + JobLevel + JobRole + PercentSalaryHike + 
+#   PerformanceRating + TotalWorkingYears
+# AIC 12039.88
+
+# we will use this model to predict income (salary)
+
+# 6 variables = STEP/BACKWARD = RMSE 991.067 (95.4% R2)
+# 10 variables = FORWARD = RMSE 983.5325 (95.4% R2)
+
+
+######################################################
+## EXTERNAL TEST DATA EXPORT - SALARY
+######################################################
+salaryData = read.csv(file.choose(), header = TRUE, sep = ",")
+
+dfColumnsSalary = data.frame(colnames(salaryData))
+dfColumnsSalary
+
+#Convert characters to factors
+salaryData[sapply(salaryData, is.character)] <- lapply(salaryData[sapply(salaryData, is.character)], 
+                                                 as.factor)
+#Check for NAs
+# sapply(salaryData,function(x) sum(is.na(x)))
+
+#Check number of levels for each factor
+# str(salaryData)
+
+#convert more columns for int to factor
+salaryData$Education <- as.factor(salkaryData$Education)
+salaryData$JobInvolvement <- as.factor(salaryData$JobInvolvement)
+salaryData$JobLevel <- as.factor(salaryData$JobLevel)
+salaryData$JobSatisfaction <- as.factor(salaryData$JobSatisfaction)
+salaryData$PerformanceRating <- as.factor(salaryData$PerformanceRating)
+salaryData$RelationshipSatisfaction <- as.factor(salaryData$RelationshipSatisfaction)
+salaryData$StockOptionLevel <- as.factor(salaryData$StockOptionLevel)
+salaryData$WorkLifeBalance <- as.factor(salaryData$WorkLifeBalance)
+
+# fit the model on the prior data 
+modelSal = lm(MonthlyIncome ~ BusinessTravel + JobLevel + JobRole + PercentSalaryHike + 
+                PerformanceRating + TotalWorkingYears, data = empDataLM)
+
+# predictions for external test data set 
+outPredictSal = predict(modelSal,newdata = salaryData)
+
+# bind ID and our salary predictions 
+outFileSal = cbind(externalTest$ID, outPredictSal)
+outFileSal = as.data.frame(outFileSal)
+head(outFileSal, n = 5)
+
+# rename columns 
+outFileSal = outFileSal %>% rename(ID = V1, MonthlyIncome = outPredictSal)
+
+# We don't need fractional dollars here
+outFileSal$MonthlyIncome <- sapply(outFileSal$MonthlyIncome, round)
+head(outFileSal, n = 5)
+
+write.csv(outFileSal, file = "Case2PredictionsSchuerger_Salary.csv", row.names = FALSE, quote = FALSE)
